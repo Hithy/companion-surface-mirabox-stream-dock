@@ -3,7 +3,8 @@ import type { StreamDockModelDefinition } from './list.js'
 export const M18V3Definition: StreamDockModelDefinition = {
 	productName: 'Stream Dock M18V3',
 	iconRotation: 0,
-	usbIds: [{ vendorId: 0x6603, productIds: [0x1012] }],
+	// 0x1012 = EN firmware, 0x1009 = CN firmware (same hardware, see the OpenDeck M18 plugin)
+	usbIds: [{ vendorId: 0x6603, productIds: [0x1012, 0x1009] }],
 
 	inputs: [
 		{
@@ -141,8 +142,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 0,
 			column: 0,
 			name: 'LCD 1',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -150,8 +151,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 0,
 			column: 1,
 			name: 'LCD 2',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -159,8 +160,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 0,
 			column: 2,
 			name: 'LCD 3',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -168,8 +169,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 0,
 			column: 3,
 			name: 'LCD 4',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -177,8 +178,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 0,
 			column: 4,
 			name: 'LCD 5',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -186,8 +187,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 1,
 			column: 0,
 			name: 'LCD 6',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -195,8 +196,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 1,
 			column: 1,
 			name: 'LCD 7',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -204,8 +205,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 1,
 			column: 2,
 			name: 'LCD 8',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -213,8 +214,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 1,
 			column: 3,
 			name: 'LCD 9',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -222,8 +223,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 1,
 			column: 4,
 			name: 'LCD 10',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -231,8 +232,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 2,
 			column: 0,
 			name: 'LCD 11',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -240,8 +241,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 2,
 			column: 1,
 			name: 'LCD 12',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -249,8 +250,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 2,
 			column: 2,
 			name: 'LCD 13',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -258,8 +259,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 2,
 			column: 3,
 			name: 'LCD 14',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 		{
 			type: 'lcd',
@@ -267,8 +268,8 @@ export const M18V3Definition: StreamDockModelDefinition = {
 			row: 2,
 			column: 4,
 			name: 'LCD 15',
-			resolutionx: 60,
-			resolutiony: 60,
+			resolutionx: 64,
+			resolutiony: 64,
 		},
 	],
 }
