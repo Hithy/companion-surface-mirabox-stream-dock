@@ -2,15 +2,29 @@
 	"name": "companion-surface-mirabox-stream-dock",
 	"version": "1.3.0",
 	"main": "dist/main.js",
+	"types": "dist/main.d.ts",
 	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/main.d.ts",
+			"default": "./dist/main.js"
+		},
+		"./driver": {
+			"types": "./dist/driver/index.d.ts",
+			"default": "./dist/driver/index.js"
+		},
+		"./package.json": "./package.json"
+	},
 	"scripts": {
 		"postinstall": "husky",
 		"format": "prettier -w .",
-		"package": "run build && companion-surface-build",
-		"build": "rimraf dist && run build:main && run build:manifest-usb-ids",
+		"package": "npm run build && companion-surface-build",
+		"build": "rimraf dist && npm run build:main && npm run build:manifest-usb-ids",
 		"build:main": "tsc -p tsconfig.build.json",
 		"build:manifest-usb-ids": "tsx ./tools/update-usb-ids.mjs",
 		"dev": "tsc -p tsconfig.build.json --watch",
+		"probe": "tsx ./tools/m18-probe.mts",
+		"demo": "tsx ./tools/m18-demo.mts",
 		"lint:raw": "eslint",
 		"lint": "run lint:raw ."
 	},

@@ -2,6 +2,22 @@
 
 See [HELP.md](./companion/HELP.md) and [LICENSE](./LICENSE)
 
+## Standalone driver
+
+`src/driver/` contains a reusable USB HID driver for Stream Dock devices (M18 first) with no
+dependency on Companion, so the hardware can also be used from your own application.
+See [docs/DRIVER.md](./docs/DRIVER.md) for the API and protocol notes, or
+[docs/DRIVER.zh-CN.md](./docs/DRIVER.zh-CN.md) for the Chinese developer manual.
+
+```sh
+# with npm (works without Corepack/Yarn 4): npm run probe -- list
+yarn probe list                  # enumerate devices
+yarn probe info --no-shutdown    # model, capabilities, key map
+yarn probe listen 20             # key / button events
+yarn probe pattern --hold 20     # per-key verification pattern
+yarn demo                        # animated reference application
+```
+
 ## Getting started
 
 Executing a `yarn` command should perform all necessary steps to develop the module, if it does not then follow the steps below.
@@ -11,6 +27,13 @@ The module can be built once with `yarn build`. This should be enough to get the
 While developing the module, by using `yarn dev` the compiler will be run in watch mode to recompile the files on change.
 
 ## Version History
+
+### Unreleased
+
+- feat: standalone driver in `src/driver` (M18: 15 keys, 3 buttons, 24 LEDs, both product ids)
+- feat: M18 CN firmware (0x6603:0x1009) for the Companion surface module
+- fix: M18 panel is 64x64, 60x60 rendered misaligned on hardware
+- verified on hardware: 24 addressable LEDs, 15 keys + 3 buttons with press/release events
 
 ### 1.3.0 (2026-10-20)
 
