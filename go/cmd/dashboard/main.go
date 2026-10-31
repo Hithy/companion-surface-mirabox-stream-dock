@@ -2,11 +2,15 @@
 //
 //	go run ./cmd/dashboard
 //
-// Layout: clock, date, CPU, memory, GPU, VRAM, one key per CPU cluster (P/E cores on
-// hybrid chips, or a single "CPU" cluster), runtime stats and a five sample CPU history.
-// Only keys whose content changed are redrawn (250 ms tick).
+// Page 1: clock, date, CPU, memory, GPU, VRAM, one key per CPU cluster (P/E cores on
+// hybrid chips), runtime stats and a five sample CPU history. Only keys whose content
+// changed are redrawn (250 ms tick).
 //
-// Bottom buttons: 1 = LEDs on/off, 2 = LED mode (load / rainbow / off), 3 = brightness.
+// Press the CPU key (key 3) for the per-core page: utilisation and current clock of every
+// logical processor. There the bottom buttons page left/right and the middle button goes
+// back to the main page.
+//
+// Bottom buttons on the main page: 1 = LEDs on/off, 2 = LED mode, 3 = brightness.
 // Ctrl+C restores the LEDs and closes the device.
 package main
 
@@ -35,6 +39,16 @@ const (
 	metricInterval = time.Second
 	flashDuration  = 220 * time.Millisecond
 	tileCount      = 15
+
+	// cpuKeyIndex is the key that opens the per-core page.
+	cpuKeyIndex = 2
+)
+
+type page int
+
+const (
+	pageMain page = iota
+	pageCPU
 )
 
 type ledMode int
@@ -67,6 +81,74 @@ type state struct {
 	ledMode   ledMode
 	bright    int
 	tick      int
+
+	page    page
+	cpuPage int
+	// redrawAll forces a full repaint, used when the page changes.
+	redrawAll bool
+}
+
+// eventResult tells the caller what side effects an event needs.
+type eventResult struct {
+	pageChanged   bool
+	setBrightness bool
+	newBrightness int
+}
+
+// handleEvent applies one key/button event to the dashboard state.
+func (st *state) handleEvent(event m18.Event, now time.Time) eventResult {
+	st.lastEvent = shortName(event)
+	if !event.Pressed {
+		return eventResult{}
+	}
+
+	st.flashKey = event.Index
+	st.flashTill = now.Add(flashDuration)
+
+	if st.page == pageCPU {
+		if event.Kind != m18.KindButton {
+			return eventResult{}
+		}
+		switch event.Index {
+		case 0:
+			if st.cpuPage > 0 {
+				st.cpuPage--
+				return eventResult{pageChanged: true}
+			}
+		case 1:
+			st.page = pageMain
+			return eventResult{pageChanged: true}
+		case 2:
+			if (st.cpuPage+1)*tileCount < len(st.metrics.Cores) {
+				st.cpuPage++
+				return eventResult{pageChanged: true}
+			}
+		}
+		return eventResult{}
+	}
+
+	if event.Kind == m18.KindKey && event.Index == cpuKeyIndex {
+		st.page = pageCPU
+		st.cpuPage = 0
+		return eventResult{pageChanged: true}
+	}
+
+	if event.Kind == m18.KindButton {
+		switch event.Index {
+		case 0:
+			st.ledOn = !st.ledOn
+		case 1:
+			st.ledMode = (st.ledMode + 1) % 3
+		case 2:
+			if st.bright == 100 {
+				st.bright = 40
+			} else {
+				st.bright = 100
+			}
+			return eventResult{setBrightness: true, newBrightness: st.bright}
+		}
+	}
+	return eventResult{}
 }
 
 type tileKind int
@@ -76,6 +158,7 @@ const (
 	tileClock
 	tileDate
 	tileHistory
+	tileCore
 )
 
 // tile is the content of one key; `sig` changes whenever the key has to be redrawn.
@@ -84,13 +167,14 @@ type tile struct {
 	sig      string
 	label    string
 	value    string
+	note     string
 	fraction float64
 	color    color.RGBA
 }
 
 func main() {
 	duration := flag.Duration("duration", 0, "exit after this duration (0 = run until Ctrl+C)")
-	dump := flag.String("dump", "", "write the 15 tiles as PNGs to this directory and exit (no device needed)")
+	dump := flag.String("dump", "", "write the tiles as PNGs to this directory and exit (no device needed)")
 	live := flag.Bool("live", false, "with -dump, collect real metrics instead of synthetic values")
 	flag.Parse()
 
@@ -133,27 +217,16 @@ func main() {
 	go func() {
 		for event := range dock.Events() {
 			mu.Lock()
-			st.lastEvent = shortName(event)
-			if event.Pressed {
-				st.flashKey = event.Index
-				st.flashTill = time.Now().Add(flashDuration)
-				if event.Kind == m18.KindButton {
-					switch event.Index {
-					case 0:
-						st.ledOn = !st.ledOn
-					case 1:
-						st.ledMode = (st.ledMode + 1) % 3
-					case 2:
-						if st.bright == 100 {
-							st.bright = 40
-						} else {
-							st.bright = 100
-						}
-						_ = dock.SetBrightness(ctx, st.bright)
-					}
-				}
+			result := st.handleEvent(event, time.Now())
+			if result.pageChanged {
+				st.redrawAll = true
 			}
+			brightness := result.newBrightness
 			mu.Unlock()
+
+			if result.setBrightness {
+				_ = dock.SetBrightness(ctx, brightness)
+			}
 			log.Printf("%v %s (%s)", event.Pressed, event.Name, event.ID)
 		}
 	}()
@@ -199,10 +272,22 @@ func main() {
 			copy(st.history[1:], st.history[:historyLength-1])
 			st.history[0] = st.metrics.CPU
 		}
+		force := st.redrawAll
+		st.redrawAll = false
 		snapshot := st
 		mu.Unlock()
 
-		tiles := buildTiles(snapshot)
+		if force {
+			lastSig = [tileCount]string{}
+		}
+
+		var tiles [tileCount]tile
+		if snapshot.page == pageCPU {
+			tiles = buildCPUPage(snapshot)
+		} else {
+			tiles = buildTiles(snapshot)
+		}
+
 		var batch []m18.KeyImage
 		for index := range tiles {
 			if tiles[index].sig == lastSig[index] {
@@ -225,8 +310,8 @@ func main() {
 	}
 }
 
-// buildTiles lays out the 15 keys. The cluster keys grow from index 6 and are padded with
-// runtime statistics; the last five keys are always the CPU history.
+// buildTiles lays out the main page. The cluster keys grow from index 6 and are padded
+// with runtime statistics; the last five keys are always the CPU history.
 func buildTiles(st state) [tileCount]tile {
 	var tiles [tileCount]tile
 
@@ -291,11 +376,86 @@ func buildTiles(st state) [tileCount]tile {
 		}
 	}
 
-	if st.flashKey >= 0 && st.flashKey < tileCount && st.now.Before(st.flashTill) {
-		tiles[st.flashKey].sig += " !"
+	applyFlash(tiles[:], st)
+	return tiles
+}
+
+// buildCPUPage lays out up to 15 logical cores per page, padded with a page indicator and
+// a back hint when there is room.
+func buildCPUPage(st state) [tileCount]tile {
+	var tiles [tileCount]tile
+
+	cores := st.metrics.Cores
+	pages := (len(cores) + tileCount - 1) / tileCount
+	if pages == 0 {
+		pages = 1
+	}
+	page := st.cpuPage
+	if page >= pages {
+		page = pages - 1
 	}
 
+	used := 0
+	for i := 0; i < tileCount; i++ {
+		index := page*tileCount + i
+		if index >= len(cores) {
+			break
+		}
+		tiles[i] = coreTile(cores[index])
+		used++
+	}
+
+	if used < tileCount {
+		tiles[used] = tile{
+			kind:  tileMetric,
+			sig:   fmt.Sprintf("page %d %d", page+1, pages),
+			label: "PAGE",
+			value: fmt.Sprintf("%d/%d", page+1, pages),
+			color: colAccent,
+		}
+		used++
+	}
+	if used < tileCount {
+		tiles[used] = tile{
+			kind:  tileMetric,
+			sig:   "back",
+			label: "BTN2",
+			value: "BACK",
+			color: colLabel,
+		}
+	}
+
+	applyFlash(tiles[:], st)
 	return tiles
+}
+
+func applyFlash(tiles []tile, st state) {
+	if st.flashKey >= 0 && st.flashKey < len(tiles) && st.now.Before(st.flashTill) {
+		tiles[st.flashKey].sig += " !"
+	}
+}
+
+func coreTile(core CoreStat) tile {
+	note := "?"
+	if core.MHz > 0 {
+		note = formatMHz(core.MHz)
+	}
+	return tile{
+		kind:     tileCore,
+		sig:      fmt.Sprintf("core %d %.0f %d", core.Index, core.Percent, core.MHz),
+		label:    fmt.Sprintf("C%d", core.Index),
+		value:    fmt.Sprintf("%.0f", core.Percent),
+		note:     note,
+		fraction: core.Percent / 100,
+		color:    levelColor(core.Percent / 100),
+	}
+}
+
+func formatMHz(mhz uint32) string {
+	if mhz >= 1000 {
+		return fmt.Sprintf("%.1fG", float64(mhz)/1000)
+	}
+	return fmt.Sprintf("%dM", mhz)
 }
 
 func percentTile(label string, value float64) tile {
@@ -375,6 +535,15 @@ func renderTile(index int, t tile, st state) *image.RGBA {
 		fillRect(img, 24, 16, 16, 32, colTrack)
 		fillRect(img, 24, 16+32-height, 16, height, t.color)
 		centerText(img, 51, t.value, 2, colValue)
+
+	case tileCore:
+		centerText(img, 2, t.label, 2, colLabel)
+		scale := fitScale(t.value, 60, 5)
+		centerText(img, 14, t.value, scale, colValue)
+		drawBar(img, 8, 46, 48, 4, t.fraction, t.color)
+		if t.note != "" {
+			centerText(img, 52, t.note, 2, colAccent)
+		}
 
 	default:
 		centerText(img, 4, t.label, 2, colLabel)
@@ -500,6 +669,7 @@ func dumpTiles(dir string, live bool) error {
 			Clusters:   []ClusterStat{{Name: "P", Percent: 31}, {Name: "E", Percent: 55}},
 			Uptime:     51*time.Hour + 12*time.Minute,
 			Goroutines: 12, HeapMB: 4.6, FPS: 4,
+			Cores: syntheticCores(20),
 		},
 		history: [historyLength]float64{37, 51, 23, 80, 12},
 		ledOn:   true,
@@ -515,30 +685,51 @@ func dumpTiles(dir string, live bool) error {
 		for index := 0; index < historyLength; index++ {
 			st.history[index] = st.metrics.CPU
 		}
-		log.Printf("live metrics: cpu=%.1f mem=%.1f gpu=%.1f vram=%.0f/%.0f MB clusters=%v",
+		log.Printf("live metrics: cpu=%.1f mem=%.1f gpu=%.1f vram=%.0f/%.0f MB clusters=%v cores=%d",
 			st.metrics.CPU, st.metrics.Mem, st.metrics.GPU,
-			st.metrics.VRAMUsedMB, st.metrics.VRAMTotalMB, st.metrics.Clusters)
+			st.metrics.VRAMUsedMB, st.metrics.VRAMTotalMB, st.metrics.Clusters, len(st.metrics.Cores))
 	}
 
+	if err := writeSheet(dir+"/dashboard.png", buildTiles(st), st); err != nil {
+		return err
+	}
+
+	st.page = pageCPU
+	st.cpuPage = 0
+	if err := writeSheet(dir+"/cpu-page1.png", buildCPUPage(st), st); err != nil {
+		return err
+	}
+	st.cpuPage = 1
+	return writeSheet(dir+"/cpu-page2.png", buildCPUPage(st), st)
+}
+
+func syntheticCores(count int) []CoreStat {
+	cores := make([]CoreStat, count)
+	for i := range cores {
+		cores[i] = CoreStat{
+			Index:   i,
+			Percent: float64((i*17 + 11) % 100),
+			MHz:     uint32(3200 + (i%6)*300),
+		}
+	}
+	return cores
+}
+
+func writeSheet(path string, tiles [tileCount]tile, st state) error {
 	sheet := image.NewRGBA(image.Rect(0, 0, 5*(tileW+4)-4, 3*(tileH+4)-4))
 	fillRect(sheet, 0, 0, sheet.Bounds().Dx(), sheet.Bounds().Dy(), color.RGBA{R: 0x30, G: 0x30, B: 0x38, A: 0xff})
 
-	tiles := buildTiles(st)
 	for index := 0; index < tileCount; index++ {
 		tileImage := renderTile(index, tiles[index], st)
-		if err := writePNG(fmt.Sprintf("%s/tile-%02d.png", dir, index), tileImage); err != nil {
-			return err
-		}
-		x := (index%5)*(tileW+4) + 0
-		y := (index/5)*(tileH+4) + 0
+		x := (index % 5) * (tileW + 4)
+		y := (index / 5) * (tileH + 4)
 		for ty := 0; ty < tileH; ty++ {
 			for tx := 0; tx < tileW; tx++ {
 				sheet.Set(x+tx, y+ty, tileImage.At(tx, ty))
 			}
 		}
 	}
-
-	return writePNG(dir+"/dashboard.png", sheet)
+	return writePNG(path, sheet)
 }
 
 func writePNG(path string, img image.Image) error {

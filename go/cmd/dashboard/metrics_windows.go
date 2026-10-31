@@ -4,6 +4,7 @@ package main
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +16,9 @@ var (
 	ntdll    = syscall.NewLazyDLL("ntdll.dll")
 	pdhDLL   = syscall.NewLazyDLL("pdh.dll")
 
+	powrprof = syscall.NewLazyDLL("powrprof.dll")
+
+	procCallNtPowerInformation     = powrprof.NewProc("CallNtPowerInformation")
 	procGetSystemTimes             = kernel32.NewProc("GetSystemTimes")
 	procGlobalMemoryStatusEx       = kernel32.NewProc("GlobalMemoryStatusEx")
 	procGetTickCount64             = kernel32.NewProc("GetTickCount64")
@@ -30,6 +34,7 @@ var (
 
 const (
 	systemProcessorPerformanceInformation = 8
+	processorInformationLevel             = 11
 	pdhFmtDouble                          = 0x00000200
 	// PDH_MORE_DATA is returned by the sizing call, it is not an error here.
 	pdhMoreData        = 0x800007D2
@@ -161,6 +166,109 @@ func (s *cpuSampler) init() {
 	s.ready = true
 }
 
+// processorPowerInformation mirrors PROCESSOR_POWER_INFORMATION from powrprof.h.
+type processorPowerInformation struct {
+	Number           uint32
+	MaxMhz           uint32
+	CurrentMhz       uint32
+	MhzLimit         uint32
+	MaxIdleState     uint32
+	CurrentIdleState uint32
+}
+
+// nominalMHz returns the nominal clock of every logical processor (powrprof).
+func nominalMHz() []uint32 {
+	count := int(activeProcessorCount())
+	if count <= 0 || count > maxProcessors {
+		return nil
+	}
+
+	buf := make([]processorPowerInformation, count)
+	status, _, _ := procCallNtPowerInformation.Call(
+		processorInformationLevel,
+		0, 0,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf))*unsafe.Sizeof(buf[0]),
+	)
+	if status != 0 {
+		return nil
+	}
+
+	out := make([]uint32, count)
+	for _, info := range buf {
+		if int(info.Number) >= count {
+			continue
+		}
+		out[info.Number] = info.MaxMhz
+	}
+	return out
+}
+
+// freqSampler turns "\Processor Information(*)\% Processor Performance" into MHz.
+// The counter is relative to the nominal clock and includes the turbo states, which is
+// what users expect to see as the current frequency.
+type freqSampler struct {
+	ready       bool
+	query       uintptr
+	counter     uintptr
+	collections int
+	percent     map[int]float64
+	nominal     []uint32
+}
+
+var freqStats freqSampler
+
+func (f *freqSampler) init() {
+	if status, _, _ := procPdhOpenQueryW.Call(0, 0, uintptr(unsafe.Pointer(&f.query))); status != 0 {
+		return
+	}
+	path := syscall.StringToUTF16Ptr(`\Processor Information(*)\% Processor Performance`)
+	procPdhAddEnglishCounterW.Call(f.query, uintptr(unsafe.Pointer(path)), 0, uintptr(unsafe.Pointer(&f.counter)))
+	f.nominal = nominalMHz()
+	f.ready = f.counter != 0 && len(f.nominal) > 0
+}
+
+// sample returns the clock of every logical processor in MHz.
+func (f *freqSampler) sample() []uint32 {
+	if !f.ready {
+		f.init()
+		if !f.ready {
+			return f.nominal
+		}
+	}
+
+	procPdhCollectQueryData.Call(f.query)
+	f.collections++
+	if f.collections >= 2 {
+		values := map[int]float64{}
+		for _, item := range pdhReadArray(f.counter) {
+			// instance names look like "0,12" (group, logical processor)
+			index := strings.LastIndex(item.name, ",")
+			if index < 0 {
+				continue
+			}
+			logical, err := strconv.Atoi(item.name[index+1:])
+			if err != nil {
+				continue
+			}
+			values[logical] = item.value
+		}
+		if len(values) > 0 {
+			f.percent = values
+		}
+	}
+
+	out := make([]uint32, len(f.nominal))
+	for index, mhz := range f.nominal {
+		factor := 1.0
+		if percent, ok := f.percent[index]; ok && percent > 0 {
+			factor = percent / 100
+		}
+		out[index] = uint32(float64(mhz)*factor + 0.5)
+	}
+	return out
+}
+
 func activeProcessorCount() uint32 {
 	count, _, _ := procGetActiveProcessorCount.Call(allProcessorGroups)
 	return uint32(count)
@@ -196,23 +304,38 @@ func (s *cpuSampler) sample(m *Metrics) {
 	totalDelta := make([]float64, len(s.names))
 	var totalIdle, totalAll float64
 
+	cores := make([]CoreStat, 0, count)
 	for i := 0; i < count; i++ {
 		perf := *(*processorPerf)(unsafe.Pointer(&buf[i*stride]))
+		percent := 0.0
 		if s.prevIdle[i] != 0 || s.prevKern[i] != 0 {
 			// kernel time includes idle time
 			dIdle := float64(perf.IdleTime - s.prevIdle[i])
 			dTotal := float64(perf.KernelTime-s.prevKern[i]) + float64(perf.UserTime-s.prevUser[i])
 			totalIdle += dIdle
 			totalAll += dTotal
+			if dTotal > 0 {
+				percent = clampPercent((dTotal - dIdle) / dTotal * 100)
+			}
 			if cluster := s.cluster[i]; cluster < len(idleDelta) {
 				idleDelta[cluster] += dIdle
 				totalDelta[cluster] += dTotal
 			}
 		}
+		cores = append(cores, CoreStat{Index: i, Percent: percent})
 		s.prevIdle[i] = perf.IdleTime
 		s.prevKern[i] = perf.KernelTime
 		s.prevUser[i] = perf.UserTime
 	}
+
+	if frequencies := freqStats.sample(); len(frequencies) > 0 {
+		for index := range cores {
+			if index < len(frequencies) {
+				cores[index].MHz = frequencies[index]
+			}
+		}
+	}
+	m.Cores = cores
 
 	if totalAll > 0 {
 		m.CPU = clampPercent((totalAll - totalIdle) / totalAll * 100)
@@ -306,7 +429,7 @@ func (g *gpuSampler) sample(m *Metrics) {
 		// Sum per engine type (3D, compute, video decode, ...) and take the busiest one,
 		// which is what the Windows task manager reports as "GPU utilisation".
 		engines := map[string]float64{}
-		for _, item := range g.readArray(g.engine) {
+		for _, item := range pdhReadArray(g.engine) {
 			lower := strings.ToLower(item.name)
 			index := strings.Index(lower, "engtype_")
 			if index < 0 {
@@ -326,7 +449,7 @@ func (g *gpuSampler) sample(m *Metrics) {
 	if g.memory != 0 {
 		// One instance per adapter; use the one with the highest dedicated usage.
 		var best float64
-		for _, item := range g.readArray(g.memory) {
+		for _, item := range pdhReadArray(g.memory) {
 			if item.value > best {
 				best = item.value
 			}
@@ -339,11 +462,13 @@ func (g *gpuSampler) sample(m *Metrics) {
 	m.VRAMTotalMB = g.totalMB
 }
 
-func (g *gpuSampler) readArray(counter uintptr) []pdhSample {
+// pdhReadArray returns the value (and instance name) of every instance of a PDH counter.
+func pdhReadArray(counter uintptr) []pdhSample {
 	var size, items uint32
 	status, _, _ := procPdhGetFormattedCounterArrayW.Call(
 		counter, pdhFmtDouble, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&items)), 0,
 	)
+	// The sizing call returns PDH_MORE_DATA, that is expected.
 	if size == 0 || items == 0 || (status != 0 && status != pdhMoreData) {
 		return nil
 	}

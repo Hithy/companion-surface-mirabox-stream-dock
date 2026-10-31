@@ -200,6 +200,13 @@ go run ./cmd/dashboard -dump ./preview -live   # 用真实指标导出（同样�
 
 底部按钮：1 = 灯开关，2 = LED 模式（LOAD/RAIN/OFF），3 = 亮度切换（90/100）。
 
+**CPU 详情页**：在主页面按第 3 个键（CPU）进入，15 个键显示每个**逻辑核心**的利用率和当前频率
+（超过 15 核自动分页，页尾显示 `PAGE 1/2` 和 `BTN2 BACK`）。详情页里底部按钮变成：
+左 = 上一页、**中 = 返回主页面**、右 = 下一页。
+频率来源：Windows 用 PDH `Processor Information(*)% Processor Performance` × 标称频率
+（标称频率来自 `CallNtPowerInformation`），所以睿频会体现出来；Linux 读
+`/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq`，没有 cpufreq 时显示 `?`。
+
 **CPU 分簇（只聚合，不逐核显示）**
 Windows：`GetSystemCpuSetInformation` 取每个逻辑核的 EfficiencyClass，配合
 `NtQuerySystemInformation(SystemProcessorPerformanceInformation)` 的每核时间做增量聚合；

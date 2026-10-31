@@ -88,6 +88,23 @@ func initClusters(count int) {
 	}
 }
 
+// coreFrequenciesMHz reads the current clock from cpufreq (kHz), 0 when unavailable.
+func coreFrequenciesMHz(count int) []uint32 {
+	out := make([]uint32, count)
+	for i := 0; i < count; i++ {
+		data, err := os.ReadFile(fmt.Sprintf("/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i))
+		if err != nil {
+			continue
+		}
+		khz, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil {
+			continue
+		}
+		out[i] = uint32(khz / 1000)
+	}
+	return out
+}
+
 func readProcStat() (perCPU [][2]uint64, ok bool) {
 	file, err := os.Open("/proc/stat")
 	if err != nil {
@@ -144,23 +161,35 @@ func collectPlatform(m *Metrics) {
 		totalDelta := make([]float64, len(linuxClusters))
 		var totalIdle, totalAll float64
 
+		cores := make([]CoreStat, 0, len(perCPU))
 		for i, sample := range perCPU {
 			if i >= len(linuxPrevIdle) {
 				break
 			}
+			percent := 0.0
 			if linuxPrevTotal[i] != 0 {
 				dIdle := float64(sample[0] - linuxPrevIdle[i])
 				dTotal := float64(sample[1] - linuxPrevTotal[i])
 				totalIdle += dIdle
 				totalAll += dTotal
+				if dTotal > 0 {
+					percent = clampPercent((dTotal - dIdle) / dTotal * 100)
+				}
 				cluster := linuxClusterOf[i]
 				if cluster < len(idleDelta) {
 					idleDelta[cluster] += dIdle
 					totalDelta[cluster] += dTotal
 				}
 			}
+			cores = append(cores, CoreStat{Index: i, Percent: percent})
 			linuxPrevIdle[i], linuxPrevTotal[i] = sample[0], sample[1]
 		}
+
+		frequencies := coreFrequenciesMHz(len(cores))
+		for index := range cores {
+			cores[index].MHz = frequencies[index]
+		}
+		m.Cores = cores
 
 		if totalAll > 0 {
 			m.CPU = clampPercent((totalAll - totalIdle) / totalAll * 100)
