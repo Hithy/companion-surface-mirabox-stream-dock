@@ -3,76 +3,17 @@
 package m18
 
 import (
-	"encoding/binary"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
-// listPlatform reads the hidraw class, which exposes the vendor/product id, the serial
-// number and the report descriptor (used to tell the control interface from the keyboard
-// emulation interface).
+// listPlatform reads the hidraw class; see hid_sysfs.go for the parsing.
 func listPlatform() ([]Info, error) {
-	entries, err := os.ReadDir("/sys/class/hidraw")
-	if err != nil {
-		return nil, err
-	}
-
-	var out []Info
-	for _, entry := range entries {
-		base := filepath.Join("/sys/class/hidraw", entry.Name(), "device")
-		uevent, err := os.ReadFile(filepath.Join(base, "uevent"))
-		if err != nil {
-			continue
-		}
-
-		info := Info{Path: "/dev/" + entry.Name()}
-		for _, line := range strings.Split(string(uevent), "\n") {
-			switch {
-			case strings.HasPrefix(line, "HID_ID="):
-				// 0003:00006603:00001012
-				parts := strings.Split(strings.TrimPrefix(line, "HID_ID="), ":")
-				if len(parts) == 3 {
-					if v, err := strconv.ParseUint(parts[1], 16, 32); err == nil {
-						info.VendorID = uint16(v)
-					}
-					if v, err := strconv.ParseUint(parts[2], 16, 32); err == nil {
-						info.ProductID = uint16(v)
-					}
-				}
-			case strings.HasPrefix(line, "HID_NAME="):
-				info.Product = strings.TrimPrefix(line, "HID_NAME=")
-			case strings.HasPrefix(line, "HID_UNIQ="):
-				info.Serial = strings.TrimPrefix(line, "HID_UNIQ=")
-			}
-		}
-
-		if usagePage, usage, ok := reportDescriptorUsage(filepath.Join(base, "report_descriptor")); ok {
-			info.UsagePage, info.Usage = usagePage, usage
-			info.IsVendorIF = usagePage == vendorHIDUsagePage && usage == vendorHIDUsage
-		}
-		out = append(out, info)
-	}
-	return out, nil
-}
-
-// reportDescriptorUsage extracts the first Usage Page / Usage pair of a HID report
-// descriptor: 06 <page:2> 09 <usage>.
-func reportDescriptorUsage(path string) (uint16, uint16, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil || len(b) < 5 {
-		return 0, 0, false
-	}
-	if b[0] != 0x06 || b[3] != 0x09 {
-		return 0, 0, false
-	}
-	return binary.LittleEndian.Uint16(b[1:3]), uint16(b[4]), true
+	return listHidraw(sysfsRoot)
 }
 
 type linuxTransport struct {
@@ -99,7 +40,7 @@ func (t *linuxTransport) Read(buf []byte) (int, error) {
 	}
 
 	var set syscall.FdSet
-	set.Bits[t.fd/64] |= int64(1) << (uint(t.fd) % 64)
+	fdSetAdd(&set, t.fd)
 
 	// nil timeout: block until a report arrives, or until Close closes the fd.
 	n, err := syscall.Select(t.fd+1, &set, nil, nil, nil)
@@ -152,4 +93,14 @@ func (t *linuxTransport) Close() error {
 		return nil
 	}
 	return syscall.Close(t.fd)
+}
+
+// fdSetAdd sets the bit for fd in a syscall.FdSet.
+//
+// FdSet.Bits is [16]int64 on 64 bit and [32]int32 on 32 bit Linux, so the bitmap is
+// addressed byte wise. That is correct for the little endian architectures we target
+// (amd64, arm64, arm, 386).
+func fdSetAdd(set *syscall.FdSet, fd int) {
+	bytes := (*[unsafe.Sizeof(syscall.FdSet{})]byte)(unsafe.Pointer(set))
+	bytes[fd/8] |= 1 << (uint(fd) % 8)
 }

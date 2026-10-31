@@ -47,6 +47,33 @@ go build ./cmd/demo
 
 要求 Go ≥ 1.24（只用到标准库）。
 
+## Linux
+
+权限（systemd 系统）：
+
+```bash
+sudo cp 60-mirabox-m18.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+# 拔插设备后
+go run ./cmd/probe list
+```
+
+非 systemd 发行版把规则里的 `TAG+="uaccess"` 换成 `MODE="0666"`（或 `GROUP="plugdev"` + `MODE="0660"`）。
+
+验证顺序（建议）：
+
+```bash
+go run ./cmd/probe list                  # 应看到 control(0xffa0/1) 与 secondary(0x1/6)
+go run ./cmd/probe info
+go run ./cmd/probe pattern -hold 30s     # 数字 + 四角标记
+go run ./cmd/probe led-scan              # 24 颗灯逐颗点亮
+go run ./cmd/probe listen -duration 20s  # 按键（结束时打印 raw/events 计数）
+```
+
+Linux 与 Windows 的差异只有"怎么拿到设备"和"怎么阻塞读"：协议、图像、解析都是同一份代码；
+`hidraw` **不会**在报文前加 report id，解析器两种形式都接受。
+
 ## 用法
 
 ```go
@@ -136,7 +163,7 @@ go run ./cmd/probe brightness 80
 go run ./cmd/demo                        # 参考应用，Ctrl+C 退出
 ```
 
-已在 M18 EN（`6603:1012`，序列号 `08A903783D06`）上验证：枚举、唤醒、15 键批量绘制、
+已在 Windows 的 M18 EN（`6603:1012`，序列号 `08A903783D06`）上验证：枚举、唤醒、15 键批量绘制、
 `SETLB`/`LBLIG`、亮度、`Close` 关机时序，以及**全部 18 个控件**（15 键 + 3 按钮）
 按下/松开共 36 条事件（`probe listen`）。
 

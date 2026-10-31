@@ -1,0 +1,13 @@
+# Mirabox Stream Dock M18 — hidraw access for the logged in user.
+#
+#   sudo cp 60-mirabox-m18.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#   # unplug and replug the device afterwards
+#
+# 0x6603:0x1012 = EN firmware, 0x6603:0x1009 = CN firmware.
+# TAG+="uaccess" grants access to the user on the active seat (systemd-logind).
+# On distributions without uaccess, replace it with MODE="0666" ("0660" plus a GROUP).
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="6603", ATTRS{idProduct}=="1012", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="6603", ATTRS{idProduct}=="1009", TAG+="uaccess"
