@@ -17,6 +17,9 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 	"os/signal"
 	"strconv"
@@ -44,6 +47,14 @@ func main() {
 	duration := fs.Duration("duration", 15*time.Second, "listen duration")
 	delay := fs.Duration("delay", 500*time.Millisecond, "led-scan step delay")
 	colorArg := fs.String("color", "#3050ff", "colour as #rrggbb (solid / led)")
+	file := fs.String("file", "", "image file for the `image` command (png/jpeg/gif)")
+	keyIndex := fs.Int("key", 0, "key index for the `image` command")
+	allKeys := fs.Bool("all", false, "draw the image on every key")
+	fitMode := fs.String("fit", "contain", "image fit: contain, cover or stretch")
+	rotate := fs.Int("rotate", 0, "image rotation: 0, 90, 180 or 270")
+	mirrorX := fs.Bool("mirror-x", false, "mirror the image horizontally")
+	mirrorY := fs.Bool("mirror-y", false, "mirror the image vertically")
+	background := fs.String("bg", "#000000", "background colour for transparent pixels / padding")
 	_ = fs.Parse(os.Args[2:])
 
 	if cmd == "selftest" {
@@ -138,6 +149,40 @@ func main() {
 				return
 			}
 		}
+
+	case "image":
+		if *file == "" {
+			fail(errors.New("the image command needs -file <path>"))
+		}
+		opts, err := imageOptions(*fitMode, *rotate, *mirrorX, *mirrorY, *background)
+		if err != nil {
+			fail(err)
+		}
+		img, imgFormat, err := loadImage(*file)
+		if err != nil {
+			fail(err)
+		}
+
+		var batch []m18.KeyImage
+		if *allKeys {
+			for _, k := range m18.Keys {
+				batch = append(batch, m18.KeyImage{Index: k.Index, Image: img, Options: opts})
+			}
+		} else {
+			batch = append(batch, m18.KeyImage{Index: *keyIndex, Image: img, Options: opts})
+		}
+		if err := device.DrawKeys(ctx, batch); err != nil {
+			fail(err)
+		}
+
+		bounds := img.Bounds()
+		target := fmt.Sprintf("key %d", *keyIndex)
+		if *allKeys {
+			target = fmt.Sprintf("%d keys", len(batch))
+		}
+		fmt.Printf("Drew %s (%s %dx%d) on %s (fit=%s rotate=%d mirror=%v/%v)"+newline,
+			*file, imgFormat, bounds.Dx(), bounds.Dy(), target, *fitMode, *rotate, *mirrorX, *mirrorY)
+		waitOrInterrupt(ctx, *hold)
 
 	case "pattern":
 		var batch []m18.KeyImage
@@ -258,6 +303,7 @@ Commands
   info                     model, interface, key map
   listen                   print key/button events (-duration 20s, -raw)
   pattern                  numbered test tiles on every key
+  image                    draw a png/jpeg/gif (-file logo.png -key 0 -fit contain)
   solid                    fill every key (-color '#rrggbb')
   led                      set every LED (-color '#rrggbb')
   led-rainbow              rainbow over all LEDs
@@ -274,6 +320,13 @@ Flags
   -hold <dur>    keep the device open after drawing (default 10s)
   -duration <d>  listen duration (default 15s)
   -delay <d>     led-scan step delay (default 500ms)
+  -file <path>   image for the image command
+  -key <n>       target key for image (default 0)
+  -all           draw the image on every key
+  -fit <mode>    contain | cover | stretch
+  -rotate <deg>  0 | 90 | 180 | 270
+  -mirror-x / -mirror-y
+  -bg <#rrggbb>  background for transparency/padding
 `)
 }
 
@@ -494,4 +547,52 @@ func fail(err error) {
 	}
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+// loadImage decodes any image format registered in the image package.
+func loadImage(path string) (image.Image, string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
+
+	img, format, err := image.Decode(f)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode %s: %w", path, err)
+	}
+	return img, format, nil
+}
+
+func imageOptions(fit string, rotate int, mirrorX, mirrorY bool, background string) (m18.ImageOptions, error) {
+	var mode m18.Fit
+	switch fit {
+	case "contain":
+		mode = m18.FitContain
+	case "cover":
+		mode = m18.FitCover
+	case "stretch":
+		mode = m18.FitStretch
+	default:
+		return m18.ImageOptions{}, fmt.Errorf("invalid -fit %q (contain, cover or stretch)", fit)
+	}
+
+	switch rotate {
+	case 0, 90, 180, 270:
+	default:
+		return m18.ImageOptions{}, fmt.Errorf("invalid -rotate %d (0, 90, 180 or 270)", rotate)
+	}
+
+	bg, err := parseColor(background)
+	if err != nil {
+		return m18.ImageOptions{}, err
+	}
+
+	return m18.ImageOptions{
+		Fit:        mode,
+		Rotate:     rotate,
+		MirrorX:    mirrorX,
+		MirrorY:    mirrorY,
+		Background: bg,
+	}, nil
 }

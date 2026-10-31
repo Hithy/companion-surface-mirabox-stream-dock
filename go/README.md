@@ -31,8 +31,9 @@ go/
     hid_unsupported.go
     device.go      Device：写队列 goroutine、读循环、心跳、事件、命令
     *_test.go      帧字节/输入解析/图像/设备行为（mock transport）
-  cmd/probe/       命令行工具（list/listen/pattern/led/selftest…）
+  cmd/probe/       命令行工具（list/listen/pattern/image/led/selftest…）
   cmd/demo/        参考上层应用（跑马灯 + 按键反馈 + 灯追光）
+  cmd/dashboard/   15 键状态面板（时钟/CPU/内存/运行时长/CPU 历史），可 -dump 导出 PNG
 ```
 
 ## 构建
@@ -157,11 +158,51 @@ go run ./cmd/probe info                  # 键位/槽位/输入码全表
 go run ./cmd/probe listen -duration 20s  # 按键事件（-raw 打印原始报文）
 go run ./cmd/probe selftest              # 离线解析回归（无需设备）
 go run ./cmd/probe pattern -hold 30s     # 每键画数字 + 四角标记
+go run ./cmd/probe image -file logo.png  # 显示图片（见下）
 go run ./cmd/probe led-scan              # 逐颗点亮 24 颗灯
 go run ./cmd/probe led-rainbow
 go run ./cmd/probe brightness 80
 go run ./cmd/demo                        # 参考应用，Ctrl+C 退出
+go run ./cmd/dashboard -duration 30s     # 15 键状态面板
 ```
+
+### 显示图片（`probe image`）
+
+Go 标准库自带 PNG/JPEG/GIF 解码，直接喂文件即可，缩放/裁切/旋转由驱动完成：
+
+```bash
+go run ./cmd/probe image -file logo.png                    # 画到 key 1（contain）
+go run ./cmd/probe image -file logo.png -key 3 -fit cover  # 指定键 + 裁切填满
+go run ./cmd/probe image -file logo.png -all               # 15 个键都画
+go run ./cmd/probe image -file logo.png -rotate 90 -mirror-x -bg '#101018'
+```
+
+`-fit contain|cover|stretch`、`-rotate 0|90|180|270`、`-mirror-x/-mirror-y`、
+`-bg` 控制留边/透明像素的底色。
+
+### 状态面板（`cmd/dashboard`）
+
+```bash
+go run ./cmd/dashboard                    # 一直跑，Ctrl+C 退出
+go run ./cmd/dashboard -duration 30s      # 跑 30 秒后退出
+go run ./cmd/dashboard -dump ./preview    # 不需要设备，导出 15 键 PNG + 拼图
+```
+
+| 键    | 内容                         | 键  | 内容            |
+| ----- | ---------------------------- | --- | --------------- |
+| 1     | 时钟 HH:MM + 秒              | 6   | goroutine 数    |
+| 2     | 日期 + 星期                  | 7   | 堆内存 MB       |
+| 3     | CPU 占用 + 条                | 8   | 渲染 FPS        |
+| 4     | 内存占用 + 条                | 9   | 最近一次按键    |
+| 5     | 开机时长 H:MM                | 10  | LED 模式 + 亮度 |
+| 11–15 | CPU 最近 5 次采样（新 → 旧） |     |                 |
+
+底部按钮：1 = 灯开关，2 = LED 模式（LOAD/RAIN/OFF），3 = 亮度切换（90/100）。
+
+实现上演示了三件上层应用最需要的事：**250ms 定时 + 签名比对只重画变化的键**、
+**每秒采样一次指标**、**按键按下时只给那个键加高亮边框**（220ms 后自动恢复）。
+指标来源：Windows 走 `GetSystemTimes`/`GlobalMemoryStatusEx`/`GetTickCount64`（纯 Go syscall），
+Linux 读 `/proc/stat`、`/proc/meminfo`、`/proc/uptime`，其他平台只有 Go runtime 统计。
 
 已在 Windows 的 M18 EN（`6603:1012`，序列号 `08A903783D06`）上验证：枚举、唤醒、15 键批量绘制、
 `SETLB`/`LBLIG`、亮度、`Close` 关机时序，以及**全部 18 个控件**（15 键 + 3 按钮）
