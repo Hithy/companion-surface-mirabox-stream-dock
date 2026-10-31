@@ -470,6 +470,10 @@ process.on('SIGINT', async () => {
 ```
 
 > 别按前缀过滤 `ACK`：按键事件也用它（早期驱动踩过这个坑，`probe selftest` 已覆盖）。
+>
+> **Windows 多一个字节**：Windows HID 栈会在报文最前面加 1 字节 report id（`0x00`），
+> 所以 `ReadFile` 返回 513 字节、键码在 byte 10；hidapi 会自动剥掉，所以 Node 驱动看到的是
+> 512 字节、键码在 byte 9。Go 版两种都接受（`m18/parse.go` 会识别 `ACK` 的实际偏移）。
 
 ---
 

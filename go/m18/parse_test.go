@@ -2,7 +2,8 @@ package m18
 
 import "testing"
 
-// report builds an input report exactly as captured from an M18 (6603:1012).
+// report builds an input report exactly as captured from an M18 (6603:1012) on Linux /
+// through hidapi: 512 bytes, no leading report id.
 //
 //	41434b 0000 4f4b 0000 <code> <state> 0000...
 func report(code, state byte) []byte {
@@ -59,21 +60,29 @@ func TestDecodeInput(t *testing.T) {
 		{name: "truncated", data: report(0x01, 0x01)[:10]},
 	}
 
+	// The same transitions must decode identically with and without the report id byte
+	// that the Windows HID stack prepends.
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			event, err := DecodeInput(c.data)
-			if !c.wantOK {
-				if err == nil {
-					t.Fatalf("expected an error, got %+v", event)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if event != c.want {
-				t.Fatalf("event = %+v, want %+v", event, c.want)
-			}
+			checkDecode(t, c.data, c.wantOK, c.want)
+			checkDecode(t, append([]byte{0x00}, c.data...), c.wantOK, c.want)
 		})
+	}
+}
+
+func checkDecode(t *testing.T, data []byte, wantOK bool, want Event) {
+	t.Helper()
+	event, err := DecodeInput(data)
+	if !wantOK {
+		if err == nil {
+			t.Fatalf("expected an error, got %+v", event)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event != want {
+		t.Fatalf("event = %+v, want %+v", event, want)
 	}
 }

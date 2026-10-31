@@ -6,11 +6,11 @@
 
 ## 平台支持
 
-| 平台 | 状态 | HID 实现 |
-| --- | --- | --- |
-| Windows | ✅ 实机验证 | `cfgmgr32` 枚举 + `CreateFile`/overlapped `ReadFile`/`WriteFile`（`hid.dll` 取属性和 usage） |
-| Linux | ⚠️ 已实现、未上机 | `/sys/class/hidraw` + `select` + 非阻塞 fd；需要 udev 权限 |
-| macOS | ❌ 未实现 | 需要 IOHIDManager（必须 cgo），`hid_unsupported.go` 返回明确错误 |
+| 平台    | 状态              | HID 实现                                                                                     |
+| ------- | ----------------- | -------------------------------------------------------------------------------------------- |
+| Windows | ✅ 实机验证       | `cfgmgr32` 枚举 + `CreateFile`/overlapped `ReadFile`/`WriteFile`（`hid.dll` 取属性和 usage） |
+| Linux   | ⚠️ 已实现、未上机 | `/sys/class/hidraw` + `select` + 非阻塞 fd；需要 udev 权限                                   |
+| macOS   | ❌ 未实现         | 需要 IOHIDManager（必须 cgo），`hid_unsupported.go` 返回明确错误                             |
 
 Windows 下不需要 hidapi、不需要 DLL，`go build` 出的 exe 可直接拷走；
 Linux 交叉编译同样是纯 Go 产物：`GOOS=linux go build ./cmd/probe`。
@@ -91,35 +91,35 @@ func main() {
 
 ### API 一览
 
-| 方法 | 说明 |
-| --- | --- |
-| `Open(Options) (*Device, error)` | 打开（默认第一台，8s 心跳；`Heartbeat<0` 关闭心跳） |
-| `List() ([]Info, error)` / `Find(Options)` | 枚举 / 查找（含短暂重试，设备重枚举时不会误报） |
-| `Events() <-chan Event` | 按键事件（自动过滤重复状态） |
-| `Raw() <-chan []byte` | 原始输入报文（调试） |
-| `Errors() <-chan error` | 非致命错误（心跳/写入失败） |
-| `Err() error` | 读循环的致命错误 |
-| `DrawKey / DrawKeys` | 画一个 / 批量画（一次编码、单次 `STP`，批量永远优于循环） |
-| `ClearKey / ClearAll` | 清屏 |
-| `SetBrightness / SetLedBrightness` | 0..100 |
-| `SetLedColors / SetLed / UpdateLeds / SetAllLeds / LedColors` | 24 颗灯，驱动缓存状态 |
-| `Wake / Sleep / KeepAlive` | DIS / HAN / CONNECT |
-| `Close / CloseKeepImage` | 关机清屏 / 保留画面 |
+| 方法                                                          | 说明                                                      |
+| ------------------------------------------------------------- | --------------------------------------------------------- |
+| `Open(Options) (*Device, error)`                              | 打开（默认第一台，8s 心跳；`Heartbeat<0` 关闭心跳）       |
+| `List() ([]Info, error)` / `Find(Options)`                    | 枚举 / 查找（含短暂重试，设备重枚举时不会误报）           |
+| `Events() <-chan Event`                                       | 按键事件（自动过滤重复状态）                              |
+| `Raw() <-chan []byte`                                         | 原始输入报文（调试）                                      |
+| `Errors() <-chan error`                                       | 非致命错误（心跳/写入失败）                               |
+| `Err() error`                                                 | 读循环的致命错误                                          |
+| `DrawKey / DrawKeys`                                          | 画一个 / 批量画（一次编码、单次 `STP`，批量永远优于循环） |
+| `ClearKey / ClearAll`                                         | 清屏                                                      |
+| `SetBrightness / SetLedBrightness`                            | 0..100                                                    |
+| `SetLedColors / SetLed / UpdateLeds / SetAllLeds / LedColors` | 24 颗灯，驱动缓存状态                                     |
+| `Wake / Sleep / KeepAlive`                                    | DIS / HAN / CONNECT                                       |
+| `Close / CloseKeepImage`                                      | 关机清屏 / 保留画面                                       |
 
 `KeyImage{Index, Image, Options}`，`ImageOptions{Fit, Background, Rotate, MirrorX, MirrorY, Quality}`。
 图像管线：合成透明 → 镜像 → 旋转 → `FitContain`(默认)/`FitCover`/`FitStretch` → JPEG（超过 10240 字节自动降质量）。
 
 ### 与 Node 版（`src/driver`）的差异
 
-| Node 版 | Go 版 |
-| --- | --- |
+| Node 版                           | Go 版                                |
+| --------------------------------- | ------------------------------------ |
 | EventEmitter（`keyDown`/`keyUp`） | `Events()` channel + `Event.Pressed` |
-| `drawKeys(entries)` | `DrawKeys([]KeyImage)` |
-| `setLed/updateLeds` | `SetLed/UpdateLeds` |
-| 自动注册 17 个机型 | 只有 M18（砍掉） |
-| 热插拔 `watchDocks()` | 未提供（需要可加轮询） |
-| 固件版本读取 | 未实现（Windows 也读不到） |
-| macOS | 未实现 |
+| `drawKeys(entries)`               | `DrawKeys([]KeyImage)`               |
+| `setLed/updateLeds`               | `SetLed/UpdateLeds`                  |
+| 自动注册 17 个机型                | 只有 M18（砍掉）                     |
+| 热插拔 `watchDocks()`             | 未提供（需要可加轮询）               |
+| 固件版本读取                      | 未实现（Windows 也读不到）           |
+| macOS                             | 未实现                               |
 
 ## 验证
 
@@ -144,6 +144,8 @@ go run ./cmd/demo                        # 参考应用，Ctrl+C 退出
 - **JPEG 编码器差异**：Go 标准库固定 4:2:0，Node 版优先 4:2:2。当前实测 M18 接受 4:2:0；
   若换固件后出现色块，把 `image.go` 的编码换成 libjpeg-turbo 绑定（例如 `pixiv/go-libjpeg`）即可，
   其余代码不用改。
+- **输入报文偏移**：Windows 的 `ReadFile` 会在报文前加 1 字节 report id（`0x00`），
+  Linux 不会；解析器按 `ACK` 的实际位置处理两种形式（有对应单测）。
 - **读超时**：读是阻塞式的（和 hidapi 一致），`Close()` 会取消挂起的读并唤醒等待，不会卡住；
   `probe listen` 结束时会打印 `raw=N events=M err=...` 便于判断"没数据"还是"解析失败"。
 - **设备独占**：厂商软件（StreamDock / VSD Craft）和 Companion 必须退出。
