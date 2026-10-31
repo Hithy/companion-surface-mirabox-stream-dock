@@ -5,6 +5,7 @@
 
 - 驱动代码：`src/driver/`
 - 调试工具：`tools/m18-probe.mts`、`tools/m18-demo.mts`
+- Go 版（仅 M18、零依赖）：[`go/README.md`](../go/README.md)
 - 验证硬件：Mirabox Stream Dock M18（`6603:1012`），已实机确认图像/按键/24 颗 LED
 
 ---

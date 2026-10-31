@@ -9,6 +9,10 @@ dependency on Companion, so the hardware can also be used from your own applicat
 See [docs/DRIVER.md](./docs/DRIVER.md) for the API and protocol notes, or
 [docs/DRIVER.zh-CN.md](./docs/DRIVER.zh-CN.md) for the Chinese developer manual.
 
+A Go rewrite of the same driver, restricted to the M18 and with no third-party
+dependencies, lives in [go/](./go/README.md) (Windows verified, Linux implemented,
+macOS not yet supported).
+
 ```sh
 # with npm (works without Corepack/Yarn 4): npm run probe -- list
 yarn probe list                  # enumerate devices
@@ -34,6 +38,7 @@ While developing the module, by using `yarn dev` the compiler will be run in wat
 - feat: M18 CN firmware (0x6603:0x1009) for the Companion surface module
 - fix: M18 panel is 64x64, 60x60 rendered misaligned on hardware
 - verified on hardware: 24 addressable LEDs, 15 keys + 3 buttons with press/release events
+- feat: Go driver (`go/`, M18 only, no dependencies; Windows + Linux backends)
 
 ### 1.3.0 (2026-10-20)
 
