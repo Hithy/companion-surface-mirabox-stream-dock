@@ -33,7 +33,7 @@ type Device struct {
 	info Info
 	t    Transport
 
-	out    chan [][]byte
+	out    chan writeRequest
 	events chan Event
 	raw    chan []byte
 	errs   chan error
@@ -90,7 +90,7 @@ func newDevice(info Info, t Transport, heartbeat time.Duration) (*Device, error)
 	d := &Device{
 		info:    info,
 		t:       t,
-		out:     make(chan [][]byte, 32),
+		out:     make(chan writeRequest, 32),
 		events:  make(chan Event, 64),
 		raw:     make(chan []byte, 16),
 		errs:    make(chan error, 8),
@@ -290,13 +290,25 @@ func filled(c color.RGBA) []color.RGBA {
 
 // ---------------------------------------------------------------- internals
 
-func (d *Device) enqueue(ctx context.Context, batch [][]byte) error {
+// enqueue hands a batch to the writer and waits until it has been written, so callers see
+// real write errors and cannot outrun the device.
+func (d *Device) enqueue(ctx context.Context, frames [][]byte) error {
 	if d.closed.Load() {
 		return ErrClosed
 	}
+
+	request := writeRequest{frames: frames, done: make(chan error, 1)}
 	select {
-	case d.out <- batch:
-		return nil
+	case d.out <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-d.done:
+		return ErrClosed
+	}
+
+	select {
+	case err := <-request.done:
+		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-d.done:
@@ -315,15 +327,25 @@ func (d *Device) writeBatch(batch [][]byte) error {
 	return nil
 }
 
+type writeRequest struct {
+	frames [][]byte
+	// done receives the result; nil for fire-and-forget writes (heartbeat).
+	done chan error
+}
+
 func (d *Device) writer() {
 	defer d.wg.Done()
 	for {
 		select {
-		case batch := <-d.out:
-			if err := d.writeBatch(batch); err != nil {
-				if errors.Is(err, ErrClosed) {
-					return
+		case request := <-d.out:
+			err := d.writeBatch(request.frames)
+			if request.done != nil {
+				select {
+				case request.done <- err:
+				default:
 				}
+			}
+			if err != nil && !errors.Is(err, ErrClosed) {
 				d.reportError(err)
 			}
 		case <-d.done:
@@ -389,7 +411,7 @@ func (d *Device) heartbeatLoop(interval time.Duration) {
 		select {
 		case <-ticker.C:
 			select {
-			case d.out <- [][]byte{keepAliveFrame()}:
+			case d.out <- writeRequest{frames: [][]byte{keepAliveFrame()}}:
 			default: // queue full, skip this beat
 			}
 		case <-d.done:

@@ -137,7 +137,21 @@ go run ./cmd/demo                        # 参考应用，Ctrl+C 退出
 ```
 
 已在 M18 EN（`6603:1012`，序列号 `08A903783D06`）上验证：枚举、唤醒、15 键批量绘制、
-`SETLB`/`LBLIG`、亮度、输入解析（15 键 + 3 按钮、按下/松开）、`Close` 关机时序。
+`SETLB`/`LBLIG`、亮度、`Close` 关机时序，以及**全部 18 个控件**（15 键 + 3 按钮）
+按下/松开共 36 条事件（`probe listen`）。
+
+### 性能（实机，Go 1.24 / Windows）
+
+| 操作                              | 耗时                    |
+| --------------------------------- | ----------------------- |
+| `DrawKeys` 15 键（单次 STP）      | **9.6 ms**（0.6 ms/键） |
+| `DrawKeys` 2 键                   | 1.0 ms                  |
+| `DrawKey` 1 键                    | 0.5 ms                  |
+| `SetLedColors` 24 颗              | 0.1 ms                  |
+| `SetBrightness`                   | 0.1 ms                  |
+| `EncodeKeyImage`（64×64，纯 CPU） | 0.17 ms                 |
+
+60 fps 全屏重画（16.7 ms/帧）还有余量；动画建议只重画变化的键，`go test -bench .` 可复现纯 CPU 部分。
 
 ## 注意
 
