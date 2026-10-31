@@ -27,6 +27,8 @@ import (
 	"github.com/Hithy/companion-surface-mirabox-stream-dock/go/m18"
 )
 
+const newline = "\n"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -76,18 +78,6 @@ func main() {
 		}
 	}()
 
-	if *raw {
-		go func() {
-			for report := range device.Raw() {
-				head := report
-				if len(head) > 32 {
-					head = head[:32]
-				}
-				fmt.Printf("RAW   len=%d %x\n", len(report), head)
-			}
-		}()
-	}
-
 	switch cmd {
 	case "info":
 		info := device.Info()
@@ -97,7 +87,7 @@ func main() {
 		fmt.Printf("VID:PID      %04x:%04x\n", info.VendorID, info.ProductID)
 		fmt.Printf("Usage        page=%#x usage=%#x\n", info.UsagePage, info.Usage)
 		fmt.Printf("Panel        %dx%d, max %d bytes/key, %d LEDs\n", m18.ImageWidth, m18.ImageHeight, m18.MaxImageBytes, m18.LEDCount)
-		fmt.Printf("Protocol     %d byte reports\n", m18.PacketSize)
+		fmt.Printf("Protocol     %d byte reports (in=%d out=%d)\n", m18.PacketSize, info.InputReportLength, info.OutputReportLength)
 		for _, k := range m18.Keys {
 			fmt.Printf("  %-8s index %2d  id %-3s  input %#02x  slot %#02x\n", k.Name, k.Index, k.ID, k.InputID, k.Slot)
 		}
@@ -106,18 +96,43 @@ func main() {
 		}
 
 	case "listen":
-		fmt.Printf("Listening for %s, press keys/buttons...\n", *duration)
+		fmt.Printf("Listening for %s, press keys/buttons..."+newline, *duration)
 		timeout := time.After(*duration)
+		rawCh := device.Raw()
+		eventsCh := device.Events()
+		raws, events := 0, 0
 		for {
 			select {
-			case event := <-device.Events():
+			case report, ok := <-rawCh:
+				if !ok {
+					rawCh = nil
+					continue
+				}
+				raws++
+				if *raw {
+					head := report
+					if len(head) > 32 {
+						head = head[:32]
+					}
+					fmt.Printf("RAW   len=%d %x"+newline, len(report), head)
+				}
+			case event, ok := <-eventsCh:
+				if !ok {
+					eventsCh = nil
+					continue
+				}
+				events++
 				dir := "UP  "
 				if event.Pressed {
 					dir = "DOWN"
 				}
-				fmt.Printf("%s  %-8s kind=%v id=%s code=%#02x\n", dir, event.Name, event.Kind, event.ID, event.Code)
+				fmt.Printf("%s  %-8s kind=%v id=%s code=%#02x"+newline, dir, event.Name, event.Kind, event.ID, event.Code)
 			case <-timeout:
-				fmt.Println("Done.")
+				fmt.Printf("Done. raw=%d events=%d err=%v"+newline, raws, events, device.Err())
+				if raws == 0 {
+					fmt.Println("No input reports arrived at all: press a key while this command runs,")
+					fmt.Println("and make sure the vendor software / Companion is closed.")
+				}
 				return
 			case <-ctx.Done():
 				return

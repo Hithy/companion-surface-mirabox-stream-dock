@@ -150,13 +150,15 @@ func (d *Device) CloseKeepImage() error { return d.closeWith(false) }
 func (d *Device) closeWith(shutdown bool) error {
 	d.closeOnce.Do(func() {
 		d.closed.Store(true)
-		close(d.done) // stops the writer, reader and heartbeat
-		d.wg.Wait()
+		close(d.done) // stops the writer and heartbeat
 
+		// Send the shutdown while the device is still open, then close the handle so the
+		// reader (parked in a blocking read) wakes up.
 		if shutdown {
 			_ = d.writeBatch(shutdownBatch())
 		}
 		_ = d.t.Close()
+		d.wg.Wait()
 	})
 	return nil
 }
@@ -335,20 +337,15 @@ func (d *Device) reader() {
 	defer close(d.events)
 	defer close(d.raw)
 
-	buf := make([]byte, 1024)
+	readLen := d.info.InputReportLength
+	if readLen < 64 {
+		readLen = 1024
+	}
+	buf := make([]byte, readLen)
 	for {
-		select {
-		case <-d.done:
-			return
-		default:
-		}
-
-		n, err := d.t.Read(buf, 200*time.Millisecond)
+		n, err := d.t.Read(buf)
 		if err != nil {
-			if errors.Is(err, ErrTimeout) {
-				continue
-			}
-			if errors.Is(err, ErrClosed) {
+			if errors.Is(err, ErrClosed) || d.closed.Load() {
 				return
 			}
 			d.setErr(err)

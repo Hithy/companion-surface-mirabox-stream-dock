@@ -144,6 +144,8 @@ go run ./cmd/demo                        # 参考应用，Ctrl+C 退出
 - **JPEG 编码器差异**：Go 标准库固定 4:2:0，Node 版优先 4:2:2。当前实测 M18 接受 4:2:0；
   若换固件后出现色块，把 `image.go` 的编码换成 libjpeg-turbo 绑定（例如 `pixiv/go-libjpeg`）即可，
   其余代码不用改。
+- **读超时**：读是阻塞式的（和 hidapi 一致），`Close()` 会取消挂起的读并唤醒等待，不会卡住；
+  `probe listen` 结束时会打印 `raw=N events=M err=...` 便于判断"没数据"还是"解析失败"。
 - **设备独占**：厂商软件（StreamDock / VSD Craft）和 Companion 必须退出。
 - **Windows 首帧超时**：上一个进程刚退出时设备可能正在重枚举，`Open` 会自动重试一次；
   仍失败就等 1 秒再试。

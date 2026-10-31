@@ -30,19 +30,23 @@ func (m *mockTransport) Write(report []byte) error {
 	return nil
 }
 
-func (m *mockTransport) Read(buf []byte, timeout time.Duration) (int, error) {
-	select {
-	case report := <-m.reads:
-		return copy(buf, report), nil
-	case <-time.After(timeout):
-		return 0, ErrTimeout
+func (m *mockTransport) Read(buf []byte) (int, error) {
+	report, ok := <-m.reads
+	if !ok {
+		return 0, ErrClosed
 	}
+	return copy(buf, report), nil
 }
 
 func (m *mockTransport) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
 	m.closed = true
+	m.mu.Unlock()
+	close(m.reads) // wake the blocked Read
 	return nil
 }
 

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
 	"unsafe"
 )
 
@@ -27,6 +26,8 @@ var (
 	procHidPGetCaps               = modHid.NewProc("HidP_GetCaps")
 
 	procCreateEventW        = modKernel32.NewProc("CreateEventW")
+	procSetEvent            = modKernel32.NewProc("SetEvent")
+	procResetEvent          = modKernel32.NewProc("ResetEvent")
 	procGetOverlappedResult = modKernel32.NewProc("GetOverlappedResult")
 )
 
@@ -127,9 +128,11 @@ func describe(path string) (Info, error) {
 		Product:   hidString(procHidDGetProductString, h),
 	}
 
-	if usagePage, usage, ok := hidUsage(h); ok {
-		info.UsagePage, info.Usage = usagePage, usage
-		info.IsVendorIF = usagePage == vendorHIDUsagePage && usage == vendorHIDUsage
+	if caps, ok := hidCaps(h); ok {
+		info.UsagePage, info.Usage = caps.UsagePage, caps.Usage
+		info.IsVendorIF = caps.UsagePage == vendorHIDUsagePage && caps.Usage == vendorHIDUsage
+		info.InputReportLength = int(caps.InputReportByteLength)
+		info.OutputReportLength = int(caps.OutputReportByteLength)
 	}
 	return info, nil
 }
@@ -142,18 +145,18 @@ func hidString(proc *syscall.LazyProc, h syscall.Handle) string {
 	return syscall.UTF16ToString(buf)
 }
 
-func hidUsage(h syscall.Handle) (usagePage, usage uint16, ok bool) {
+func hidCaps(h syscall.Handle) (hidpCaps, bool) {
 	var preparsed unsafe.Pointer
 	if r, _, _ := procHidDGetPreparsedData.Call(uintptr(h), uintptr(unsafe.Pointer(&preparsed))); r == 0 || preparsed == nil {
-		return 0, 0, false
+		return hidpCaps{}, false
 	}
 	defer procHidDFreePreparsedData.Call(uintptr(preparsed))
 
 	var caps hidpCaps
 	if r, _, _ := procHidPGetCaps.Call(uintptr(preparsed), uintptr(unsafe.Pointer(&caps))); r == 0 {
-		return 0, 0, false
+		return hidpCaps{}, false
 	}
-	return caps.UsagePage, caps.Usage, true
+	return caps, true
 }
 
 func splitMultiSz(buf []uint16) []string {
@@ -216,15 +219,15 @@ func openPlatform(path string) (Transport, error) {
 }
 
 func createEvent() (syscall.Handle, error) {
-	// auto-reset, initially non-signalled
-	r, _, err := procCreateEventW.Call(0, 0, 0, 0)
+	// manual reset, initially non-signalled: Close signals it to wake a blocked read
+	r, _, err := procCreateEventW.Call(0, 1, 0, 0)
 	if r == 0 {
 		return 0, fmt.Errorf("m18: CreateEvent failed: %w", err)
 	}
 	return syscall.Handle(r), nil
 }
 
-func (t *winTransport) Read(buf []byte, timeout time.Duration) (int, error) {
+func (t *winTransport) Read(buf []byte) (int, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -243,21 +246,21 @@ func (t *winTransport) Read(buf []byte, timeout time.Duration) (int, error) {
 		return 0, err
 	}
 
-	ms := uint32(timeout / time.Millisecond)
-	res, werr := syscall.WaitForSingleObject(t.readEv, ms)
-	if werr != nil {
+	// Wait for the driver, do not cancel periodically: repeatedly cancelling a pending
+	// HID read makes some drivers drop the following reports.
+	if _, werr := syscall.WaitForSingleObject(t.readEv, infinite); werr != nil {
 		return 0, werr
 	}
-	if res == waitTimeoutCode {
+	if t.closed.Load() {
 		_ = syscall.CancelIoEx(t.h, &ov)
-		syscall.WaitForSingleObject(t.readEv, infinite)
-		return 0, ErrTimeout
+		return 0, ErrClosed
 	}
 
 	var done uint32
 	if err := getOverlappedResult(t.h, &ov, &done); err != nil {
 		return 0, err
 	}
+	procResetEvent.Call(uintptr(t.readEv))
 	return int(done), nil
 }
 
@@ -290,6 +293,7 @@ func (t *winTransport) Write(report []byte) error {
 	if res == waitTimeoutCode {
 		_ = syscall.CancelIoEx(t.h, &ov)
 		syscall.WaitForSingleObject(t.writeEv, infinite)
+		procResetEvent.Call(uintptr(t.writeEv))
 		return ErrWriteTimeout
 	}
 
@@ -297,6 +301,7 @@ func (t *winTransport) Write(report []byte) error {
 	if err := getOverlappedResult(t.h, &ov, &done); err != nil {
 		return err
 	}
+	procResetEvent.Call(uintptr(t.writeEv))
 	if int(done) != len(report) {
 		return fmt.Errorf("m18: short HID write: %d of %d bytes", done, len(report))
 	}
@@ -307,7 +312,10 @@ func (t *winTransport) Close() error {
 	if t.closed.Swap(true) {
 		return nil
 	}
+	// Cancel pending I/O and signal the events so a blocked Read returns right away.
 	_ = syscall.CancelIoEx(t.h, nil)
+	procSetEvent.Call(uintptr(t.readEv))
+	procSetEvent.Call(uintptr(t.writeEv))
 	syscall.CloseHandle(t.h)
 	syscall.CloseHandle(t.readEv)
 	syscall.CloseHandle(t.writeEv)

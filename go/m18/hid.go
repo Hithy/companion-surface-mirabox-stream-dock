@@ -7,8 +7,6 @@ import (
 
 // Common transport errors.
 var (
-	// ErrTimeout means no input report arrived within the read timeout.
-	ErrTimeout = errors.New("m18: hid read timed out")
 	// ErrClosed means the device handle is already closed.
 	ErrClosed = errors.New("m18: device is closed")
 	// ErrWriteTimeout means the device did not accept a report in time.
@@ -27,15 +25,20 @@ type Info struct {
 	UsagePage  uint16
 	Usage      uint16
 	IsVendorIF bool // control interface we can write to
+
+	// Report lengths reported by the device (0 when unknown). The Windows HID driver
+	// rejects a read buffer that is larger than the input report length.
+	InputReportLength  int
+	OutputReportLength int
 }
 
 // Transport is a minimal HID interface, implemented per platform.
 type Transport interface {
 	// Write sends one padded report (report id + payload).
 	Write([]byte) error
-	// Read fills buf with one input report, returning the number of bytes read.
-	// It blocks at most timeout and returns ErrTimeout when nothing arrived.
-	Read(buf []byte, timeout time.Duration) (int, error)
+	// Read blocks until one input report arrives, then fills buf and returns the number
+	// of bytes read. It returns ErrClosed when the device is closed.
+	Read(buf []byte) (int, error)
 	Close() error
 }
 

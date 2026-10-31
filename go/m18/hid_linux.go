@@ -90,7 +90,7 @@ func openPlatform(path string) (Transport, error) {
 	return &linuxTransport{fd: fd}, nil
 }
 
-func (t *linuxTransport) Read(buf []byte, timeout time.Duration) (int, error) {
+func (t *linuxTransport) Read(buf []byte) (int, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
 
@@ -100,26 +100,23 @@ func (t *linuxTransport) Read(buf []byte, timeout time.Duration) (int, error) {
 
 	var set syscall.FdSet
 	set.Bits[t.fd/64] |= int64(1) << (uint(t.fd) % 64)
-	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
 
-	n, err := syscall.Select(t.fd+1, &set, nil, nil, &tv)
+	// nil timeout: block until a report arrives, or until Close closes the fd.
+	n, err := syscall.Select(t.fd+1, &set, nil, nil, nil)
 	if err != nil {
-		if t.closed.Load() {
+		if t.closed.Load() || err == syscall.EINTR {
 			return 0, ErrClosed
-		}
-		if err == syscall.EINTR {
-			return 0, ErrTimeout
 		}
 		return 0, err
 	}
 	if n == 0 {
-		return 0, ErrTimeout
+		return 0, ErrClosed
 	}
 
 	read, err := syscall.Read(t.fd, buf)
 	if err != nil {
 		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-			return 0, ErrTimeout
+			return 0, ErrClosed
 		}
 		if t.closed.Load() {
 			return 0, ErrClosed
