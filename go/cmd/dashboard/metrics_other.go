@@ -2,5 +2,7 @@
 
 package main
 
-// collectPlatform is a stub on platforms without a metrics backend.
-func collectPlatform(m *Metrics) {}
+// collectPlatform and collectGPUPlatform are stubs on platforms without a backend; the
+// dashboard then shows only the Go runtime statistics.
+func collectPlatform(m *Metrics)    {}
+func collectGPUPlatform(m *Metrics) {}

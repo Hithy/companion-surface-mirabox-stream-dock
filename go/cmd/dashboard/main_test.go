@@ -13,7 +13,10 @@ func testState() state {
 		now:       time.Date(2026, 10, 31, 21, 47, 8, 0, time.Local),
 		lastEvent: "K7",
 		metrics: Metrics{
-			CPU: 37, Mem: 68, Uptime: 51*time.Hour + 12*time.Minute,
+			CPU: 37, Mem: 68, GPU: 42,
+			VRAMUsedMB: 2415, VRAMTotalMB: 23.98 * 1024,
+			Clusters:   []ClusterStat{{Name: "P", Percent: 31}, {Name: "E", Percent: 55}},
+			Uptime:     51*time.Hour + 12*time.Minute,
 			Goroutines: 12, HeapMB: 4.6, FPS: 4,
 		},
 		history: [historyLength]float64{37, 51, 23, 80, 12},
@@ -25,8 +28,9 @@ func testState() state {
 
 func TestRenderTiles(t *testing.T) {
 	st := testState()
+	tiles := buildTiles(st)
 	for index := range [15]struct{}{} {
-		tile := renderTile(index, st)
+		tile := renderTile(index, tiles[index], st)
 		if tile.Bounds().Dx() != tileW || tile.Bounds().Dy() != tileH {
 			t.Fatalf("tile %d is %v", index, tile.Bounds())
 		}
@@ -52,19 +56,18 @@ func TestFlashBorder(t *testing.T) {
 	st.flashKey = 3
 	st.flashTill = st.now.Add(time.Second)
 
-	tile := renderTile(3, st)
-	if c := tile.RGBAAt(0, 0); c != colAccent {
+	tiles := buildTiles(st)
+	if c := renderTile(3, tiles[3], st).RGBAAt(0, 0); c != colAccent {
 		t.Fatalf("border pixel = %v, want %v", c, colAccent)
 	}
-	plain := renderTile(4, st)
-	if c := plain.RGBAAt(0, 0); c == colAccent {
+	if c := renderTile(4, tiles[4], st).RGBAAt(0, 0); c == colAccent {
 		t.Fatal("a tile without focus must not have the accent border")
 	}
 }
 
 func TestDumpTiles(t *testing.T) {
 	dir := t.TempDir()
-	if err := dumpTiles(dir); err != nil {
+	if err := dumpTiles(dir, false); err != nil {
 		t.Fatal(err)
 	}
 

@@ -3,6 +3,8 @@
 package main
 
 import (
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -10,10 +12,29 @@ import (
 
 var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	ntdll    = syscall.NewLazyDLL("ntdll.dll")
+	pdhDLL   = syscall.NewLazyDLL("pdh.dll")
 
-	procGetSystemTimes       = kernel32.NewProc("GetSystemTimes")
-	procGlobalMemoryStatusEx = kernel32.NewProc("GlobalMemoryStatusEx")
-	procGetTickCount64       = kernel32.NewProc("GetTickCount64")
+	procGetSystemTimes             = kernel32.NewProc("GetSystemTimes")
+	procGlobalMemoryStatusEx       = kernel32.NewProc("GlobalMemoryStatusEx")
+	procGetTickCount64             = kernel32.NewProc("GetTickCount64")
+	procGetActiveProcessorCount    = kernel32.NewProc("GetActiveProcessorCount")
+	procGetSystemCpuSetInformation = kernel32.NewProc("GetSystemCpuSetInformation")
+	procNtQuerySystemInformation   = ntdll.NewProc("NtQuerySystemInformation")
+
+	procPdhOpenQueryW                = pdhDLL.NewProc("PdhOpenQueryW")
+	procPdhAddEnglishCounterW        = pdhDLL.NewProc("PdhAddEnglishCounterW")
+	procPdhCollectQueryData          = pdhDLL.NewProc("PdhCollectQueryData")
+	procPdhGetFormattedCounterArrayW = pdhDLL.NewProc("PdhGetFormattedCounterArrayW")
+)
+
+const (
+	systemProcessorPerformanceInformation = 8
+	pdhFmtDouble                          = 0x00000200
+	// PDH_MORE_DATA is returned by the sizing call, it is not an error here.
+	pdhMoreData        = 0x800007D2
+	allProcessorGroups = 0xffff
+	maxProcessors      = 256
 )
 
 type filetime struct {
@@ -35,35 +56,180 @@ type memoryStatusEx struct {
 	AvailExtendedVirtual uint64
 }
 
-var (
-	lastIdle   uint64
-	lastKernel uint64
-	lastUser   uint64
-	lastValid  bool
-)
+type processorPerf struct {
+	IdleTime       uint64
+	KernelTime     uint64
+	UserTime       uint64
+	DpcTime        uint64
+	InterruptTime  uint64
+	InterruptCount uint32
+	_              uint32
+}
 
-// collectPlatform reads CPU load, memory load and uptime through kernel32, no cgo and no
-// extra dependencies.
-func collectPlatform(m *Metrics) {
-	var idle, kernel, user filetime
-	ok, _, _ := procGetSystemTimes.Call(
-		uintptr(unsafe.Pointer(&idle)),
-		uintptr(unsafe.Pointer(&kernel)),
-		uintptr(unsafe.Pointer(&user)),
+// cpuSampler aggregates the per-processor times into clusters, using the efficiency class
+// the scheduler reports (P-cores / E-cores on hybrid CPUs).
+type cpuSampler struct {
+	ready    bool
+	count    int
+	prevIdle [maxProcessors]uint64
+	prevKern [maxProcessors]uint64
+	prevUser [maxProcessors]uint64
+
+	class   [maxProcessors]int
+	cluster [maxProcessors]int
+	names   []string
+}
+
+var cpuStats cpuSampler
+
+func (s *cpuSampler) init() {
+	s.count = int(activeProcessorCount())
+
+	var returned uint32
+	buf := make([]byte, 16*1024)
+	ok, _, _ := procGetSystemCpuSetInformation.Call(
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&returned)), 0, 0,
 	)
-	if ok != 0 {
-		i, k, u := idle.value(), kernel.value(), user.value()
-		if lastValid {
-			// kernel time includes idle time
-			idleDelta := float64(i - lastIdle)
-			total := float64(k-lastKernel) + float64(u-lastUser)
-			if total > 0 {
-				m.CPU = clampPercent((total - idleDelta) / total * 100)
+	if ok == 0 {
+		return
+	}
+
+	cores := map[int]int{}
+	for offset := 0; offset+20 <= int(returned); {
+		size := *(*uint32)(unsafe.Pointer(&buf[offset]))
+		if size == 0 || offset+int(size) > int(returned) {
+			break
+		}
+		if *(*uint32)(unsafe.Pointer(&buf[offset+4])) == 0 { // CpuSet entries only
+			logical := int(buf[offset+14])
+			if logical < maxProcessors {
+				s.class[logical] = int(buf[offset+18])
+				cores[logical] = int(buf[offset+15])
 			}
 		}
-		lastIdle, lastKernel, lastUser = i, k, u
-		lastValid = true
+		offset += int(size)
 	}
+	if len(cores) == 0 {
+		return
+	}
+
+	byClass := map[int][]int{}
+	for logical := range cores {
+		class := s.class[logical]
+		byClass[class] = append(byClass[class], logical)
+	}
+	classes := make([]int, 0, len(byClass))
+	for class := range byClass {
+		classes = append(classes, class)
+	}
+	sort.Ints(classes)
+
+	// A cluster that exposes more logical processors than physical cores uses SMT, which
+	// is the performance cluster on hybrid parts.
+	smt := map[int]bool{}
+	for _, class := range classes {
+		distinct := map[int]struct{}{}
+		for _, logical := range byClass[class] {
+			distinct[cores[logical]] = struct{}{}
+		}
+		smt[class] = len(byClass[class]) > len(distinct)
+	}
+	smtClusters := 0
+	for _, class := range classes {
+		if smt[class] {
+			smtClusters++
+		}
+	}
+
+	s.names = make([]string, len(classes))
+	for index, class := range classes {
+		switch {
+		case len(classes) == 1:
+			s.names[index] = "CPU"
+		case smtClusters == 1 && smt[class]:
+			s.names[index] = "P"
+		case smtClusters == 1:
+			s.names[index] = "E"
+		default:
+			s.names[index] = "C" + string(rune('0'+index))
+		}
+		for _, logical := range byClass[class] {
+			s.cluster[logical] = index
+		}
+	}
+
+	s.ready = true
+}
+
+func activeProcessorCount() uint32 {
+	count, _, _ := procGetActiveProcessorCount.Call(allProcessorGroups)
+	return uint32(count)
+}
+
+func (s *cpuSampler) sample(m *Metrics) {
+	if !s.ready {
+		s.init()
+		if !s.ready {
+			return
+		}
+	}
+	if s.count <= 0 {
+		return
+	}
+
+	stride := int(unsafe.Sizeof(processorPerf{}))
+	buf := make([]byte, s.count*stride)
+	var returned uint32
+	status, _, _ := procNtQuerySystemInformation.Call(
+		systemProcessorPerformanceInformation,
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&returned)),
+	)
+	if status != 0 {
+		return
+	}
+	count := int(returned) / stride
+	if count > s.count {
+		count = s.count
+	}
+
+	idleDelta := make([]float64, len(s.names))
+	totalDelta := make([]float64, len(s.names))
+	var totalIdle, totalAll float64
+
+	for i := 0; i < count; i++ {
+		perf := *(*processorPerf)(unsafe.Pointer(&buf[i*stride]))
+		if s.prevIdle[i] != 0 || s.prevKern[i] != 0 {
+			// kernel time includes idle time
+			dIdle := float64(perf.IdleTime - s.prevIdle[i])
+			dTotal := float64(perf.KernelTime-s.prevKern[i]) + float64(perf.UserTime-s.prevUser[i])
+			totalIdle += dIdle
+			totalAll += dTotal
+			if cluster := s.cluster[i]; cluster < len(idleDelta) {
+				idleDelta[cluster] += dIdle
+				totalDelta[cluster] += dTotal
+			}
+		}
+		s.prevIdle[i] = perf.IdleTime
+		s.prevKern[i] = perf.KernelTime
+		s.prevUser[i] = perf.UserTime
+	}
+
+	if totalAll > 0 {
+		m.CPU = clampPercent((totalAll - totalIdle) / totalAll * 100)
+	}
+
+	m.Clusters = make([]ClusterStat, 0, len(s.names))
+	for index, name := range s.names {
+		percent := 0.0
+		if totalDelta[index] > 0 {
+			percent = clampPercent((totalDelta[index] - idleDelta[index]) / totalDelta[index] * 100)
+		}
+		m.Clusters = append(m.Clusters, ClusterStat{Name: name, Percent: percent})
+	}
+}
+
+func collectPlatform(m *Metrics) {
+	cpuStats.sample(m)
 
 	status := memoryStatusEx{Length: uint32(unsafe.Sizeof(memoryStatusEx{}))}
 	if ok, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&status))); ok != 0 {
@@ -73,4 +239,177 @@ func collectPlatform(m *Metrics) {
 	if ticks, _, _ := procGetTickCount64.Call(); ticks != 0 {
 		m.Uptime = time.Duration(ticks) * time.Millisecond
 	}
+}
+
+// ---------------------------------------------------------------- GPU (PDH)
+
+type pdhCounterValue struct {
+	status uint32
+	_      uint32
+	value  float64
+}
+
+type pdhCounterItem struct {
+	name  *uint16
+	value pdhCounterValue
+}
+
+type gpuSampler struct {
+	ready       bool
+	query       uintptr
+	engine      uintptr
+	memory      uintptr
+	collections int
+	util        float64
+	usedMB      float64
+	totalMB     float64
+}
+
+var gpuStats gpuSampler
+
+type pdhSample struct {
+	name  string
+	value float64
+}
+
+func (g *gpuSampler) init() {
+	if g.ready {
+		return
+	}
+
+	if status, _, _ := procPdhOpenQueryW.Call(0, 0, uintptr(unsafe.Pointer(&g.query))); status != 0 {
+		return
+	}
+	enginePath := syscall.StringToUTF16Ptr(`\GPU Engine(*)\Utilization Percentage`)
+	memoryPath := syscall.StringToUTF16Ptr(`\GPU Adapter Memory(*)\Dedicated Usage`)
+	procPdhAddEnglishCounterW.Call(g.query, uintptr(unsafe.Pointer(enginePath)), 0, uintptr(unsafe.Pointer(&g.engine)))
+	procPdhAddEnglishCounterW.Call(g.query, uintptr(unsafe.Pointer(memoryPath)), 0, uintptr(unsafe.Pointer(&g.memory)))
+
+	g.totalMB = registryVRAMTotalMB()
+	g.ready = g.engine != 0 || g.memory != 0
+}
+
+func (g *gpuSampler) sample(m *Metrics) {
+	g.init()
+	if !g.ready {
+		return
+	}
+
+	// PDH needs two collections before it can compute a rate.
+	procPdhCollectQueryData.Call(g.query)
+	g.collections++
+	if g.collections < 2 {
+		return
+	}
+
+	if g.engine != 0 {
+		// Sum per engine type (3D, compute, video decode, ...) and take the busiest one,
+		// which is what the Windows task manager reports as "GPU utilisation".
+		engines := map[string]float64{}
+		for _, item := range g.readArray(g.engine) {
+			lower := strings.ToLower(item.name)
+			index := strings.Index(lower, "engtype_")
+			if index < 0 {
+				continue
+			}
+			engines[lower[index+len("engtype_"):]] += item.value
+		}
+		var best float64
+		for _, value := range engines {
+			if value > best {
+				best = value
+			}
+		}
+		g.util = clampPercent(best)
+	}
+
+	if g.memory != 0 {
+		// One instance per adapter; use the one with the highest dedicated usage.
+		var best float64
+		for _, item := range g.readArray(g.memory) {
+			if item.value > best {
+				best = item.value
+			}
+		}
+		g.usedMB = best / 1024 / 1024
+	}
+
+	m.GPU = g.util
+	m.VRAMUsedMB = g.usedMB
+	m.VRAMTotalMB = g.totalMB
+}
+
+func (g *gpuSampler) readArray(counter uintptr) []pdhSample {
+	var size, items uint32
+	status, _, _ := procPdhGetFormattedCounterArrayW.Call(
+		counter, pdhFmtDouble, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&items)), 0,
+	)
+	if size == 0 || items == 0 || (status != 0 && status != pdhMoreData) {
+		return nil
+	}
+
+	buf := make([]byte, size)
+	status, _, _ = procPdhGetFormattedCounterArrayW.Call(
+		counter, pdhFmtDouble, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&items)),
+		uintptr(unsafe.Pointer(&buf[0])),
+	)
+	if status != 0 {
+		return nil
+	}
+
+	stride := int(unsafe.Sizeof(pdhCounterItem{}))
+	out := make([]pdhSample, 0, items)
+	for i := 0; i < int(items); i++ {
+		item := (*pdhCounterItem)(unsafe.Pointer(&buf[i*stride]))
+		name := ""
+		if item.name != nil {
+			name = syscall.UTF16ToString(unsafe.Slice(item.name, 512))
+		}
+		out = append(out, pdhSample{name: name, value: item.value.value})
+	}
+	return out
+}
+
+func collectGPUPlatform(m *Metrics) {
+	gpuStats.sample(m)
+}
+
+// registryVRAMTotalMB returns the largest HardwareInformation.qwMemorySize of the display
+// adapters, which is where the driver publishes the physical VRAM (best effort).
+func registryVRAMTotalMB() float64 {
+	const classPath = `SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}`
+
+	var key syscall.Handle
+	if err := syscall.RegOpenKeyEx(syscall.HKEY_LOCAL_MACHINE, syscall.StringToUTF16Ptr(classPath), 0, syscall.KEY_READ, &key); err != nil {
+		return 0
+	}
+	defer syscall.RegCloseKey(key)
+
+	var maxBytes uint64
+	for index := uint32(0); ; index++ {
+		name := make([]uint16, 256)
+		nameLen := uint32(len(name))
+		if err := syscall.RegEnumKeyEx(key, index, &name[0], &nameLen, nil, nil, nil, nil); err != nil {
+			break
+		}
+		subkeyName := syscall.UTF16ToString(name[:nameLen])
+
+		var subkey syscall.Handle
+		if err := syscall.RegOpenKeyEx(key, syscall.StringToUTF16Ptr(subkeyName), 0, syscall.KEY_READ, &subkey); err != nil {
+			continue
+		}
+		var raw [8]byte
+		size := uint32(len(raw))
+		var valueType uint32
+		err := syscall.RegQueryValueEx(subkey, syscall.StringToUTF16Ptr("HardwareInformation.qwMemorySize"), nil, &valueType, &raw[0], &size)
+		syscall.RegCloseKey(subkey)
+		if err != nil || size != 8 {
+			continue
+		}
+		value := *(*uint64)(unsafe.Pointer(&raw[0]))
+		if value > maxBytes {
+			maxBytes = value
+		}
+	}
+	return float64(maxBytes) / 1024 / 1024
 }

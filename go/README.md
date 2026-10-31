@@ -183,26 +183,39 @@ go run ./cmd/probe image -file logo.png -rotate 90 -mirror-x -bg '#101018'
 ### 状态面板（`cmd/dashboard`）
 
 ```bash
-go run ./cmd/dashboard                    # 一直跑，Ctrl+C 退出
-go run ./cmd/dashboard -duration 30s      # 跑 30 秒后退出
-go run ./cmd/dashboard -dump ./preview    # 不需要设备，导出 15 键 PNG + 拼图
+go run ./cmd/dashboard                         # 一直跑，Ctrl+C 退出
+go run ./cmd/dashboard -duration 30s           # 跑 30 秒后退出
+go run ./cmd/dashboard -dump ./preview         # 不需要设备，导出 15 键 PNG + 拼图
+go run ./cmd/dashboard -dump ./preview -live   # 用真实指标导出（同样不需要设备）
 ```
 
-| 键    | 内容                         | 键  | 内容            |
-| ----- | ---------------------------- | --- | --------------- |
-| 1     | 时钟 HH:MM + 秒              | 6   | goroutine 数    |
-| 2     | 日期 + 星期                  | 7   | 堆内存 MB       |
-| 3     | CPU 占用 + 条                | 8   | 渲染 FPS        |
-| 4     | 内存占用 + 条                | 9   | 最近一次按键    |
-| 5     | 开机时长 H:MM                | 10  | LED 模式 + 亮度 |
-| 11–15 | CPU 最近 5 次采样（新 → 旧） |     |                 |
+| 键  | 内容                          | 键    | 内容                                                            |
+| --- | ----------------------------- | ----- | --------------------------------------------------------------- |
+| 1   | 时钟 HH:MM + 秒               | 6–9   | **CPU 分簇**（P / E），不足 4 个时用 LED / EVT / FPS / GOR 补齐 |
+| 2   | 日期 + 星期                   | 10–14 | CPU 最近 5 次采样（新 → 旧，柱状）                              |
+| 3   | CPU 总占用 + 条               |       |                                                                 |
+| 4   | 内存占用 + 条                 |       |                                                                 |
+| 5   | **GPU 利用率 + 条**           |       |                                                                 |
+| 6   | **显存占用**（已用 + 占比条） |       |                                                                 |
 
 底部按钮：1 = 灯开关，2 = LED 模式（LOAD/RAIN/OFF），3 = 亮度切换（90/100）。
 
+**CPU 分簇（只聚合，不逐核显示）**
+Windows：`GetSystemCpuSetInformation` 取每个逻辑核的 EfficiencyClass，配合
+`NtQuerySystemInformation(SystemProcessorPerformanceInformation)` 的每核时间做增量聚合；
+带 SMT 的那一簇标 `P`，其余标 `E`（判断不确定时退化为 `C0/C1`；只有一簇时直接用总量，不重复显示）。
+Linux：按 `/sys/devices/system/cpu/cpuN/cpu_capacity` 分组，没有该文件时单簇。
+
+**GPU / 显存**
+Windows：PDH 性能计数器（纯 Go，无 cgo）。
+`GPU Engine(*)\Utilization Percentage` 先按引擎类型求和再取最大值（接近任务管理器口径）；
+`GPU Adapter Memory(*)\Dedicated Usage` 取各适配器最大值作为显存占用；
+总显存取注册表 `HardwareInformation.qwMemorySize` 的最大值。
+Linux：优先 `nvidia-smi`（2 秒缓存，避免每秒起进程），否则读 AMD 的
+`gpu_busy_percent` / `mem_info_vram_used` / `mem_info_vram_total`。取不到时显示 `N/A`。
+
 实现上演示了三件上层应用最需要的事：**250ms 定时 + 签名比对只重画变化的键**、
 **每秒采样一次指标**、**按键按下时只给那个键加高亮边框**（220ms 后自动恢复）。
-指标来源：Windows 走 `GetSystemTimes`/`GlobalMemoryStatusEx`/`GetTickCount64`（纯 Go syscall），
-Linux 读 `/proc/stat`、`/proc/meminfo`、`/proc/uptime`，其他平台只有 Go runtime 统计。
 
 已在 Windows 的 M18 EN（`6603:1012`，序列号 `08A903783D06`）上验证：枚举、唤醒、15 键批量绘制、
 `SETLB`/`LBLIG`、亮度、`Close` 关机时序，以及**全部 18 个控件**（15 键 + 3 按钮）
